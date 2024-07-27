@@ -1,0 +1,1007 @@
+---
+title: "Predicting the Price of Austin Airbnbs"
+author: "Linearity Legends - Barron Brothers, Jack Steel, Mert Bildirici, Kethan Poduri"
+date: "12/01/2023"
+format: pdf
+execute: 
+  warning: false
+  message: false
+  echo: false
+editor: visual
+---
+
+```{r}
+#| label: load packages and data
+library(tidyverse)
+library(tidymodels)
+library(knitr)
+library(patchwork)
+library(sf)
+library(rms)
+library(kableExtra)
+# add other packages as needed
+
+listings <- read.csv('data/listings.csv')
+```
+
+```{r mutate-data}
+# Create Stars Column
+listings$stars <- as.numeric(gsub(".*★(\\d+\\.\\d+).*", "\\1", listings$name))
+
+# Filter for Austin, Texas
+austin_listings <- listings |>
+  filter(str_detect(as.character(name), "Austin"))
+
+# Filter out Expensive Airbnbs
+austin_listings <- unique(austin_listings)
+
+# Remove Hotels 
+austin_listings <- austin_listings |>
+  filter(str_detect(as.character(room_type), "Hotel room", negate=TRUE))
+austin_listings <- unique(austin_listings)
+
+```
+
+```{r}
+#Before you submit, make sure your code chunks are turned off with `echo: false` and there are no warnings or messages with `warning: false` and `message: false` in the YAML.
+```
+
+## Introduction and Data
+
+[Airbnbs](https://www.nerdwallet.com/article/travel/are-airbnbs-more-cost-effective-than-hotels) have historically been known as a cheaper (and better) alternative to hotels. As the Airbnb market has evolved, Airbnbs have typically been getting more expensive for solo travelers and couples. If many people rent an Airbnb for long periods of time, though, it could be very economical.
+
+When people are travelling, it is important for them to get the best blend of price and experience possible. These two factors can be difficult to balance, though. As an Airbnb is more highly rated, the owner could decide to raise the price due to higher demand. People can also rate on multiple factors, such as the availability, the size of the room rented, and/or the location.
+
+The research question we will focus on is as follows: For Airbnbs in Austin, TX, **What factors most influence the price on an Airbnb, and how does that compare to the customer's priorities?**
+
+We predict that as availability decreases, the number of reviews a listing has increases, and as room type becomes larger and more private, and customer ratings become more positive, price will increase.
+
+#### Data
+
+The source of the dataset is [here](https://www.kaggle.com/datasets/deeplearner09/airbnb-listings). While the data itself is displayed on Kaggle, the data is derived from a clear external source: [InsideAirbnb](http://insideairbnb.com/austin). Our team has cross-validated the data to make sure that it is accurate. We found, from the InsideAirbnb website, that the data contains public information about the listing, such as the number of reviews a listing has, its rating, its location within the city, and its availability. Furthermore, we found that InsideAirbnb also further verifies the accuracy of the data and cleanses it themselves. The dataset itself is updated frequently, with the last update taking place on 07 Oct. 2023. The data have been collected since 2020, but prior dates are included.
+
+There are 14,681 observations in the dataset, 4,381 of which have `number_of_reviews` $\geq 30$. Generally, many of the useful variables have to do with the ratings of an observation (one Airbnb), the location of the observation, or describing the observation itself (i.e. `price`, `name`, ... etc.) The data columns can be described as follows:
+
+-   `id`: The unique identifier for each Airbnb
+-   `name` contains multiple variables, listed in order:
+    -   Type of home rented
+    -   Location (We are only using Austin)
+    -   Rating (i.e. "★4.84")---renamed `stars`
+    -   No. of bedrooms
+    -   No. of beds
+    -   No. of baths
+-   `host_id`: The unique identifier for each host
+-   `neighbourhood`: The ZIP code that the Airbnb is in
+-   `room_type`: What was rented (i.e. "Entire home/apt", "Private room", ... etc.)
+-   `price`: The daily price in local currency. Since we are only using Airbnbs in Austin, TX, this value will be in \$.
+-   `minimum_nights`: The minimum amount of nights that a person can rent out the Airbnb.
+-   `availability_365`: The number of days per year that the host lists the Airbnb as available for rental.
+-   `number_of_reviews`: The number of reviews for the Airbnb.
+-   `reviews_per_month`: The number of reviews per month for an Airbnb.
+-   `income_level`: The income level of the neighborhood based on Median House Income for the Zipcode (feature-engineered)
+
+### EDA
+
+```{r exp-data1}
+p1 = listings |>
+  filter(price < 11000) |>
+  ggplot(aes(x = stars, y = price)) +
+  geom_point(color = "seagreen", size = .5, alpha = .2) +
+  theme(text = element_text(size = 7)) +
+  labs(x = "Number of Stars", 
+       y = "Price ($)", 
+       title = "Price vs. Number of Stars a Listing Has")
+```
+
+```{r expdata2, warning = F, echo = F}
+p2 = listings |>
+  ggplot(aes(x = price)) +
+  geom_histogram(fill = "orange", color = "black", binwidth = 100) +
+  # Filter out outliers in price for a more clear display of the range. 
+  # NOTE: For display only!!!
+  xlim(0, 2000) +
+  theme(text = element_text(size = 7)) +
+  labs(x = "Price for One Night ($)", 
+       y = "Number of Listings", 
+       title = "Price Distribution Among All Listings")
+```
+
+```{r expdata3, message = F, warning = F, echo = F}
+p3 = listings |>
+  ggplot(aes(x = minimum_nights)) +
+  geom_histogram(fill = "orange", color = "black") +
+  # Filter out outliers in price for a more clear display of the range. 
+  # NOTE: For display only!!!
+  xlim(0, 45) +
+  theme(text = element_text(size = 6)) +
+  labs(x = "Minimum Nights", 
+       y = "Number of Listings", 
+       title = "Distribution of Minimum Nights Among All Listings")
+```
+
+```{r expdata4, warning = F, message = F, echo = F}
+p4 = listings |>
+  filter(minimum_nights < 45) |>
+  ggplot(aes(x = minimum_nights)) +
+  geom_histogram(fill = "orange", color = "black") +
+  theme(text = element_text(size = 6)) +
+  labs(x = "Minimum Nights", 
+       y = "Number of Listings", 
+       title = "Distribution of Minimum Nights Among All Listings")
+```
+
+```{r expdata5, echo = F}
+room_type_counts <- as.data.frame(table(listings$room_type))
+
+p5 = room_type_counts |>
+  ggplot(aes(x = Var1, y = Freq)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  labs(title = "Room Type Distribution", x = "Room Type", y = "Count") +
+  theme_minimal() +
+  theme(text = element_text(size = 6))
+```
+
+```{r expdata6, warning = F, echo = F}
+p6 = listings |>
+  filter(room_type != "Hotel room") |>
+  ggplot(aes(x = minimum_nights, y = price, color = room_type)) +
+  geom_point(alpha = .5, size = .75) +
+  facet_wrap(~room_type) +
+  # Cutting out outliers for display, same reasoning as before
+  xlim(0, 45) +
+  ylim(0, 2000) +
+  labs(title = "Price vs. Minimum Nights", x = "Minimum Nights", y = "Price per Night ($)") +
+  scale_color_discrete(name = "Room Type") +
+  theme_minimal() +
+  theme(text = element_text(size = 7.5), legend.key.size = unit(.75, 'cm'))
+```
+
+```{r expdata7, warning = F, echo = F}
+p7 = listings |>
+  filter(minimum_nights < 45) |>
+  ggplot(aes(x = minimum_nights, y = price, color = room_type)) +
+  geom_point(alpha = .5, size = .5) +
+  facet_wrap(~room_type) +
+  ylim(0,2000) +
+  labs(title = "Price vs. Minimum Nights", x = "Minimum Nights", y = "Price per Night ($)") +
+  scale_color_discrete(name = "Room Type") +
+  theme_minimal() +
+  theme(text = element_text(size = 6), legend.key.size = unit(.5, 'cm'))
+```
+
+```{r expdata8, warning = F, echo = F}
+p8 = listings |>
+  filter(number_of_reviews > 0) |>
+  ggplot(aes(x = number_of_reviews, y = price, color = reviews_per_month)) +
+  geom_point(size = .75) +
+  ylim(0,2000) +
+  labs(title = "Price vs. Number of Reviews", x = "Number of Reviews", 
+       y = "Price ($)", color = "Reviews per Month") +
+  theme_minimal() +
+  theme(text = element_text(size = 7.5), legend.key.size = unit(.4, 'cm'))
+```
+
+```{r patchwork-plots, warning = F}
+(p1 + p2) / (p4 + p5)
+p8 / p6
+```
+
+The price is right-skewed, with most listings at \$0-200. Also the room type is unimodal, with most rooms as entire home/apartments and some as private rooms. There are not many observations on shared rooms and hotel rooms. Also, the number of stars is left-skewed. This is understandable as most people who leave stars either hated or loved their stay. The host has extra incentive to aim for the latter since a couple of bad reviews can make an Airbnb with relatively few ratings stand out.
+
+```{r prepare-for-mapping, warning = F}
+# Extract geometry of Austin Zip Codes from Austin Public Records
+austin_geom <- 
+  st_read("data/Boundaries__Zip_Code_Tabulation_Areas__2017_20231111.csv", 
+          quiet = TRUE)
+
+# Turn coordinates into geom class
+austin_geom <- sf::st_as_sf(austin_geom, wkt = "the_geom")
+
+# Make sure `neighborhood` matches class of `Zip.Code`.
+# Create id variable for later
+
+austin_listings$.rownames <- 1:nrow(austin_listings)
+
+austin_listings <- austin_listings |>
+  mutate(neighbourhood = as.character(neighbourhood),
+         .rownames = as.factor(.rownames))
+
+# Join datasets, including null zip codes for plotting
+austin_geom_listings <- full_join(
+  x = austin_geom,
+  y = austin_listings,
+  by = c("Zip.Code" = "neighbourhood")
+)
+
+# Mutate `the_geom` to geometry type so map renders
+austin_geom_listings <- sf::st_as_sf(austin_geom_listings, wkt = "the_geom")
+
+# Create count and correct join error with `mutate()`
+austin_geom_count <- austin_geom_listings |>
+  group_by(Zip.Code) |>
+  count() |>
+  mutate(n = if_else(condition = n == 1, 0, n))
+
+# Turn coordinates into geom class
+austin_geom_count <- sf::st_as_sf(austin_geom_count, wkt = "the_geom")
+
+# Do the same with price and stars.
+austin_geom_price <- austin_geom_listings |>
+  group_by(Zip.Code) |>
+  filter(is.na(price) == FALSE,
+         Zip.Code != "78712") |>
+  mutate(price = as.numeric(price)) |>
+  summarise_at(vars(price), list(price = mean))
+
+austin_geom_stars <- austin_geom_listings |>
+  group_by(Zip.Code) |>
+  filter(is.na(stars) == FALSE,
+         Zip.Code != "78712") |>
+  mutate(price = as.numeric(stars)) |>
+  summarise_at(vars(stars), list(stars = mean))
+```
+
+```{r observation-geom-distribution, out.height=250, fig.align='center'}
+austin_geom_count |>
+  mutate(n = if_else(condition = n == 0, NA, n)) |>
+  ggplot(aes(geometry = the_geom, fill = log(n))) +
+  geom_sf() +
+  labs(
+    x = "Longitude",
+    y = "Latitude",
+    caption = "ZIP Codes without observations are shown in grey.
+    These ZIP codes are labeled for reference.",
+    title = "Geometric Distribution of AirBnb Observations",
+    fill = "Log No. of \nObservations"
+  ) +
+  theme(text = element_text(size = 10)) +
+  annotate("text", x = -97.85, y = 30.08, label = "78610", size = 2) +
+  annotate("text", x = -98, y = 30, label = "78652", size = 2) +
+  annotate("segment", x = -98, y = 30.02, xend = -97.9, yend = 30.14, linewidth = .4) +
+  annotate("text", x = -97.61, y = 30.16, label = "78617", size = 2) +
+  annotate("text", x = -97.5, y = 30.07, label = "78612", size = 2) +
+  annotate("text", x = -97.55, y = 30.37, label = "78653", size = 2) +
+  annotate("text", x = -97.6, y = 30.46, label = "78660", size = 2) +
+  annotate("text", x = -97.55, y = 30.6, label = "78664", size = 2) +
+  annotate("segment", x = -97.55, y = 30.58, xend = -97.68, yend = 30.51, linewidth = .4) +
+  annotate("text", x = -97.7, y = 30.62, label = "78681", size = 2) +
+  annotate("segment", x = -97.7, y = 30.6, xend = -97.71, yend = 30.53, linewidth = .4) +
+  annotate("text", x = -98, y = 30.45, label = "78613", size = 2) +
+  annotate("segment", x = -97.95, y = 30.45, xend = -97.82, yend = 30.5, linewidth = .4) +
+  annotate("text", x = -97.91, y = 30.56, label = "78641", size = 2) 
+```
+
+Most of the listings are concentrated in Central and Eastern Austin. Log transform was used to improve clarity.
+
+```{r price-geom-distribution}
+geom1 <- austin_geom_price |>
+  ggplot(aes(geometry = the_geom, fill = price)) +
+  geom_sf() +
+  labs(
+    x = "Latitude",
+    y = "Longitude",
+    fill = "Average Price/Night",
+    title = "Distribution of Average Price per Night \n for Austin Airbnbs"
+  ) +
+  theme(text = element_text(size = 6), legend.key.size = unit(.35, 'cm'),
+        plot.margin = margin(-2, 0, -2, 0, unit = "cm"))
+```
+
+```{r stars-geom-distribution}
+geom2 <- austin_geom_stars |>
+  ggplot(aes(geometry = the_geom, fill = stars)) +
+  geom_sf() +
+  labs(
+    x = "Latitude",
+    y = "Longitude",
+    fill = "Average Rating",
+    caption = "Customer ratings were from a 1-5 scale.",
+    title = "Distribution of Average Ratings \n for Austin Airbnbs"
+  ) +
+  theme(text = element_text(size = 6), legend.key.size = unit(.35, 'cm'),
+        plot.margin = margin(-2, 0, -2, 0, unit = "cm"))
+```
+
+```{r patchwork2, out.height = 400}
+geom1 + geom2 + plot_annotation('Geometric Distributions of Response Variables')
+```
+
+From the maps above we can see that the average price per night is the greatest in Airbnbs located in the center and northwest sectors of the city. Additionally, the maps indicate that Airbnbs are rated relatively highly, with an average rating of around 4.7 stars, throughout the city. However, it is important to note that two ZIP codes in the SE have the worst-rated Airbnbs in the city, with an average rating of approximately 4.6 stars. It is worth clarifying, though, that these two ZIP codes have relatively few observations.
+
+## Methodology {#methodology}
+
+The goal of this model is to find the best estimate of an Airbnb's price based on the neighborhood, room type, reviews per month, available days per year, the number of stars customers gave, how many listings the host has, minimum nights you could stay at the listing, number of reviews, and number of reviews in the last twelve months. A linear model is appropriate since the predicted outcome is a numerical value (`price`), and not binary. Different room types might attract people from different backgrounds and might be in different price ranges. Also, the neighborhood that the listing is in---whether in an area with a high or low median household income---might affect the price, as Airbnbs in areas where people have more disposable income are expected to be more expensive. Fewer available days per year could result in a decrease in price due to a lack of customer repute about the location. An increased number of listings the host has could indicate a more experienced host, plausibly leading to a higher price. An increased number of reviews could show how popular the listing is, plausibly attracting more customers and thus increasing the price. The ratings themselves are also crucial---a higher rating could indicate higher demand for the listing, resulting in an increase in price. A listing's minimum night policy could be correlated with its yearly availability as listings with long stays limits the availability of said listings. An interaction effect exploring this could potentially be useful. The number of reviews in the last twelve months could also be correlated to the total number of reviews, so precautions should be taken to avoid potential multicolinearity.
+
+Even without the neighborhoods in the Austin metro area that have no observations, the dataset still includes 42 neighborhoods, so the model could potentially overfit to the specific characteristics of each neighborhood, which would sacrifice generalizability to other cities. To solve this, rather than using each neighborhood as a predictor, the model includes faceted ZIP code levels based on average regional income: High-income (\$106,001+), Upper-midddle-income (\$80,001-106,000), Lower-middle-income (\$60,001-80,000), and Low-income (\$0-60,000) based on [Austin's geographic socioeconomic data](https://simplemaps.com/city/austin/zips/income-household-median). This was achieved using `step_mutate()`. Subsequently, `neighbourhood` was removed with `step_rm()`, and the faceted levels were saved to `income_level()`. For this model, we assume that the incomes in the faceted ZIP codes are relatively consistent; i.e. within a ZIP code that's classified as lower-income, there isn't a higher-income neighborhood.
+
+For the project, we decided to focus on the listings in Austin for two reasons. Out of 14861 listings, 14650 of them are in Austin, so the dataset lacks significant observations from other locations. Additionally, `price` is listed in local currencies, which would add another layer of unnecessary complexity since currency exchange rates can and do change. For example, the Turkish lira constantly fluctuates against the dollar, which makes it difficult to convert the price on listings in Turkey to dollars.
+
+To improve model accuracy, we also filtered out any observation in `price` \> 500, which was approximately the outlier boundary of 1.5\*IQR. (See [Additional EDA Plots](#additional-eda-plots))
+
+```{r filter}
+# Filter High Prices
+austin_listings_filtered <- austin_listings |>
+  filter(price < 500)
+```
+
+We first created a standard full model with `income_level`, `room_type`, `reviews_per_month`, `availability_365`, `stars`, `calculated_host_listings_count`, `minimum_nights`, `number_of_reviews`, and `number_of_reviews_ltm`. Seeing a pattern in the residuals, that violated linearity, we opted for a log-transformed linear model, which corrected this. (See the [residual plots](#residual-plots) below.) Every predictor was well within the margin for statistical significance ($p_{x_i} \approx 0 \ll \alpha$) except for `number_of_reviews` and `number_of_reviews_ltm`, which had $p = 0.0724 > .05$ and $p = 0.7594 \gg .05$, respectively. To assess the validity of these predictors, we conducted a drop-in-deviance test, where:
+
+```{r split-data-log-transform}
+# Log Transform
+austin_listings_filtered <- austin_listings_filtered |>
+  mutate(logprice = log(price))
+
+# Initial Split
+set.seed(123)
+austin_listings_split <- initial_split(austin_listings_filtered)
+
+# Training Data
+austin_train <- training(austin_listings_split)
+
+# Testing Data 
+austin_test <- testing(austin_listings_split)
+```
+
+```{r full-model}
+# Predict Price from Month it was Last Reviewed, Customer Rating, Neighbourhood, 
+# Room Type, Number of Reviews, Reviews per Month, Calculate_Host_Listings, 
+# Availibility 365
+
+# Austin Listings Initialize Recipe 
+aus_listings_rec <- recipe(
+  logprice ~ neighbourhood + room_type + reviews_per_month + availability_365 + 
+    stars + calculated_host_listings_count + minimum_nights + 
+    number_of_reviews + number_of_reviews_ltm,
+  data = austin_train
+)
+
+# Create Recipe
+aus_listings_rec <- aus_listings_rec |>
+  step_mutate(
+    income_level = case_when(
+      neighbourhood == "78738" | neighbourhood == "78738" |
+        neighbourhood == "78737" | neighbourhood == "78732" |
+        neighbourhood == "78733" | neighbourhood == "78739" |
+        neighbourhood == "78746" | neighbourhood == "78730" |
+        neighbourhood == "78701" | neighbourhood == "78734" |
+        neighbourhood == "78717" | neighbourhood == "78703" ~
+        "High Income",
+      neighbourhood == "78749" | neighbourhood == "78750" |
+        neighbourhood == "78735" | neighbourhood == "78731" |
+        neighbourhood == "78736" | neighbourhood == "78759" |
+        neighbourhood == "78747" | neighbourhood == "78756" |
+        neighbourhood == "78727" | neighbourhood == "78729" |
+        neighbourhood == "78704" ~
+        "Upper Mid Income",
+      neighbourhood == "78726" | neighbourhood == "78748" |
+        neighbourhood == "78757" | neighbourhood == "78754" |
+        neighbourhood == "78719" | neighbourhood == "78751" |
+        neighbourhood == "78745" | neighbourhood == "78702" |
+        neighbourhood == "78722" | neighbourhood == "78758" |
+        neighbourhood == "78728" ~
+        "Lower Mid Income",
+      neighbourhood == "78725" | neighbourhood == "78723" |
+        neighbourhood == "78744" | neighbourhood == "78705" |
+        neighbourhood == "78741" | neighbourhood == "78721" |
+        neighbourhood == "78752" | neighbourhood == "78724" |
+        neighbourhood == "78753" | neighbourhood == "78712" |
+        neighbourhood == "78742" ~
+        "Low Income"
+    ), income_level = factor(income_level, levels = c("High Income", "Upper Mid Income", "Lower Mid Income", "Low Income"))
+  ) |>
+  step_rm(neighbourhood) |>
+  step_center(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+```
+
+```{r full-model-wflow}
+# Prep and Bake
+# aus_listings_rec |>
+#   prep() |>
+#   bake(austin_train) |>
+#   glimpse()
+
+# Create Model
+austin_spec <- linear_reg() |>
+  set_engine("lm")
+
+# Create Workflow
+austin_wflow <- workflow() |>
+  add_model(austin_spec) |>
+  add_recipe(aus_listings_rec)
+
+# Fit Model
+austin_fit <- austin_wflow |>
+  fit(data = austin_train) 
+```
+
+```{r reduced-recipe}
+reduced_rec <- recipe(
+  logprice ~ id + neighbourhood + room_type + reviews_per_month + availability_365 + 
+    stars + calculated_host_listings_count + minimum_nights,
+  data = austin_train
+)
+
+reduced_rec <- reduced_rec |>
+  step_mutate(
+    income_level = case_when(
+      neighbourhood == "78738" | neighbourhood == "78738" |
+        neighbourhood == "78737" | neighbourhood == "78732" |
+        neighbourhood == "78733" | neighbourhood == "78739" |
+        neighbourhood == "78746" | neighbourhood == "78730" |
+        neighbourhood == "78701" | neighbourhood == "78734" |
+        neighbourhood == "78717" | neighbourhood == "78703" ~
+        "High Income",
+      neighbourhood == "78749" | neighbourhood == "78750" |
+        neighbourhood == "78735" | neighbourhood == "78731" |
+        neighbourhood == "78736" | neighbourhood == "78759" |
+        neighbourhood == "78747" | neighbourhood == "78756" |
+        neighbourhood == "78727" | neighbourhood == "78729" |
+        neighbourhood == "78704" ~
+        "Upper Mid Income",
+      neighbourhood == "78726" | neighbourhood == "78748" |
+        neighbourhood == "78757" | neighbourhood == "78754" |
+        neighbourhood == "78719" | neighbourhood == "78751" |
+        neighbourhood == "78745" | neighbourhood == "78702" |
+        neighbourhood == "78722" | neighbourhood == "78758" |
+        neighbourhood == "78728" ~
+        "Lower Mid Income",
+      neighbourhood == "78725" | neighbourhood == "78723" |
+        neighbourhood == "78744" | neighbourhood == "78705" |
+        neighbourhood == "78741" | neighbourhood == "78721" |
+        neighbourhood == "78752" | neighbourhood == "78724" |
+        neighbourhood == "78753" | neighbourhood == "78712" |
+        neighbourhood == "78742" ~
+        "Low Income"
+    ), income_level = factor(income_level, levels = c("High Income", "Upper Mid Income", "Lower Mid Income", "Low Income"))
+  ) |>
+  step_rm(neighbourhood) |>
+  update_role(id, new_role = "ID") |>
+  step_center(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors()) 
+
+```
+
+```{r reduced-workflow}
+# reduced_rec |>
+#   prep() |>
+#   bake(austin_train) |>
+#   glimpse() |>
+#   data.frame()
+  
+
+# Create Model
+reduced_spec <- linear_reg() |>
+  set_engine("lm")
+
+# Create Workflow
+reduced_wflow <- workflow() |>
+  add_model(reduced_spec) |>
+  add_recipe(reduced_rec)
+
+# Fit Model
+reduced_fit <- reduced_wflow |>
+  fit(data = austin_train)
+```
+
+$$
+H_0: \beta_{\text{number of reviews}}, \beta_{\text{reviews in last 12 mo.}} = 0
+$$
+
+$$
+H_A: \beta_{\text{number of reviews}} \ \text{OR} \ \beta_{\text{reviews in last 12 mo.}} = 0
+$$
+
+The results of the drop-in-deviance test are as follows:
+
+```{r drop-in-deviance-test}
+# Drop-in Deviance Test
+dev_reduced <- glance(reduced_fit)$deviance
+
+dev_full <- glance(austin_fit)$deviance
+
+test_stat <- dev_reduced - dev_full
+
+p_dev <- pchisq(test_stat, 2, lower.tail = FALSE)
+
+tibble("Reduced deviance" = dev_reduced, "Full deviance" = dev_full, 
+       "Test statistic" = test_stat, "P-value" = p_dev) |>
+  kable(align = "c", longtable = TRUE, digits = 5, booktabs = TRUE) |>
+  add_header_above(c("Table 1.1: Drop-in-Deviance Test Results for Red. vs. Full Models" = 4), bold = TRUE) |>
+  row_spec(1, hline_after = FALSE)
+```
+
+Below are some additional helpful comparative statistics between the two models:
+
+```{r evaluative-statistics}
+# AIC 
+red_AIC <- glance(reduced_fit)$AIC
+full_AIC <- glance(austin_fit)$AIC
+
+# BIC 
+red_BIC <- glance(reduced_fit)$BIC
+full_BIC <- glance(austin_fit)$BIC
+
+#Rsquared
+
+red_r.squared <- glance(reduced_fit)$r.squared
+full_r.squared <- glance(austin_fit)$r.squared
+red_adj_r.squared <- glance(reduced_fit)$adj.r.squared
+full_adj_r.squared <- glance(austin_fit)$adj.r.squared
+
+#RMSE
+
+red_rmse <- sqrt(reduced_fit$fit$fit$fit$df.residual^2)
+full_rmse <- sqrt(austin_fit$fit$fit$fit$df.residual^2)
+
+tibble(Model = c("Reduced", "Full"), AIC = c(red_AIC, full_AIC), 
+       BIC = c(red_BIC, full_BIC), R.squared = c(red_r.squared, full_r.squared), 
+       Adj.R.Squared = c(red_adj_r.squared, full_adj_r.squared), 
+       RMSE = c(red_rmse, full_rmse)) |>
+  kable(digits = 5, align = "c", longtable = TRUE, booktabs = TRUE) |>
+  kableExtra::add_header_above(c("Table 1.2: Red. vs. Full Comparitive Model Statistics" = 6), bold = TRUE) |>
+  row_spec(1:2, hline_after = FALSE)
+```
+
+Since $p = .1366 > \alpha$, we do not have enough evidence to reject $H_0$. In other words, we do not have enough evidence that the terms $\beta_{\text{number of reviews}}, \beta_{\text{reviews in last 12 mo.}}$ are useful to our model. Therefore, we will proceed with the reduced model.
+
+The comparative model statistics are not cohesive. The BIC favors the reduced model over the full, and the AIC favors the opposite. This makes sense as BIC tends to favor more streamlined models, and heavily penalizes models with more than 8 predictor terms. The Adj. $\text{R}^2$ decreases slightly and the $RMSE$ increases slightly, indicating that the reduced model has slightly more error and explains less of the variability in the data. To favor parsimony corresponding with the BIC and the drop-in-deviance test, the reduced model is chosen.
+
+We also attempted to build an interaction-fit model. We started with all of the terms interacting with each other, which resulted in many terms having high VIF values ($\sim10^2$ magnitude) that violated multicolinearity (see [Table 3.1](#interaction-model-statistics) in appendix). To attempt to resolve this, these terms were eliminated in successive iterations. By the second iteration, the $\text{R}^2$ of 0.3364 (see [Table 3.2](#interaction-model-statistics) in appendix) was significantly less than the $\text{R}^2$ of the reduced model (0.3644), which had no multicolinearity issues. Therefore, our final model chosen was the reduced model.
+
+### Check Conditions
+
+```{r check-linearity-red}
+reduced_aug <- reduced_fit$fit$fit$fit |>
+  augment(new_data = austin_train, data_key = id) |>
+  data.frame()
+
+# Create the plot
+p_linearity_red <- reduced_aug |>
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point(color = "blue", alpha = .4) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme(text = element_text(size = 10)) +
+  labs(
+    x = "Fitted value", y = "Residual",
+    title = "Residuals vs. Fitted Values \n of the Log Adjusted Price"
+  )
+```
+
+```{r check-normality-red}
+p_normality_red <- reduced_aug |>
+  ggplot(aes(x = .resid)) +
+  geom_histogram(fill = "red", color = "Black") +
+  theme(text = element_text(size = 10)) +
+  labs(
+    x = "Residual value",
+    title = "Distribution of Residual \n Values"
+  )
+```
+
+There is no pattern in the residuals suggesting that linearity is violated, so the linearity condition is satisfied. While the fitted values in the residual plot are uneven, there is no obvious fan-shape in the data, so constant variance is satisfied. The distribution of residual values appears to be normal with a center of 0 and a peak at approximately 1000 observations, so normality is satisfied. See [residual plots](#residual-plots) for reference.
+
+```{r vif-initial, warning = F}
+full_vif <- tidy(vif(austin_fit$fit$fit$fit))
+reduced_vif <- tidy(vif(reduced_fit$fit$fit$fit))
+
+reduced_vif |>
+  kable(col.names = c("Variables", "Reduced Model"),
+        align = "c", longtable = TRUE, booktabs = TRUE) |>
+  add_header_above(c("Table 2.2: VIF Values for Reduced Model" = 2), bold = TRUE) |>
+  row_spec(1:10, hline_after = FALSE)
+```
+
+For each variable in both models, the $VIF<10$, so there is no significant correlation between the variables listed. (See the VIF breakdown for the full model in [Table 2.1](#vif))
+
+The data was collected spatially, but `income_level` was an attempt to account for this. To double-check, a [spatial residual plot](#spatial-residual-plot) of the average residual per area was plotted with respect to the observations in that area to give a sense of expected variability. (Areas with a lower number of observations could have a higher variability.) There is a notable outlier at about (-97.4, 30.36), ZIP #78757, which could be investigated further, but isn't any discernable pattern with the residuals in general. Other than spatial income level, we have no reason to believe that independence was violated with the data collection, so therefore independence is satisfied.
+
+### Model Testing
+
+To test how our model performs on new data, we will use the testing data with the following results:
+
+```{r fit-to-test}
+reduced_fit_pred <- predict(reduced_fit, austin_test) |>
+  bind_cols(austin_test)
+
+reduced_fit_pred <- reduced_fit_pred |>
+  select(.pred, neighbourhood, room_type, logprice, minimum_nights,
+         number_of_reviews, reviews_per_month, calculated_host_listings_count,
+         availability_365, stars) |>
+  filter(is.na(.pred) == FALSE)
+
+pred_r.squared <- rsq(reduced_fit_pred, truth = logprice, estimate = .pred)
+pred_adj.r.squared <- pred_r.squared$.estimate * (count(austin_test)-10-1)/(count(austin_test)-1)
+pred_rmse <- rmse(reduced_fit_pred, truth = logprice, estimate = .pred)
+
+tibble("R.squared" = pred_r.squared$.estimate, "Adj.R.squared" = pred_adj.r.squared,
+       "RMSE" = pred_rmse$.estimate) |>
+  kable(align = "c", longtable = TRUE, booktabs = TRUE) |>
+  add_header_above(c("Table 4: Model Evaluation Test Statistics" = 3), bold = TRUE) |>
+  row_spec(1, hline_after = FALSE)
+```
+
+As seen above, the $\text{R}^2$ and Adj. $\text{R}^2$ statistics of the model on the testing data are similar to that of the model fit on the training data.
+
+The average magnitude of the errors in the predictions, when transformed to the original scale, will be influenced by a factor of $e^{.499}=1.647$. This is the factor by which the predicted prices, on average, deviate from the actual prices.
+
+## Results
+
+The final reduced model is as follows:
+
+```{r red-model-display}
+reduced_fit |>
+  tidy() |>
+  kable(digits=5, align = "c", booktabs = TRUE,
+        col.names = c("Term", "Estimate", "Std. Error", "T-statistic", "P-value")) |>
+  add_header_above(c("Table 5: Reduced Model Log Terms" = 5), bold = TRUE) |>
+  row_spec(1:10, hline_after = FALSE) |>
+  kable_styling(fixed_thead = FALSE, latex_options = "hold_position")
+```
+
+The equation for our final model is as follows:
+
+$$
+\begin{aligned}
+& \widehat{\log(price)} = 5.254 -0.043 \times \text{reviews per month} + 3.56*10^{-4} \times \text{yearly availability}
+\\
+& +0.272 \times \text{stars} -1.259 * 10^{-3} \times \text{number of listings host has} -1.306*10^{-3} \times \text{minimum nights} 
+\\
+&-0.3572 \times \text{Income Level::Low Income} -0.2469 \times \text{Income Level::Lower Mid Income} 
+\\
+& -0.2501 \times \text{Income Level::Upper Mid Income} -0.8528 \times \text{Room Type::Private Room} 
+\\
+&-1.724 \times \text{Room Type::Shared Room} 
+\end{aligned}
+$$
+
+The intercept of the model portrays a typical Airbnb setting: one with the average number of reviews per month (1.568, so 1-2 effectively), the average yearly availability (about 151 days), the average rating (4.84 stars), the average number of listings of the host (about 11 listings), the minimum number of nights (about a week), in a high-income area of Austin and a rental of the full property space. The average nightly price for this Airbnb is $e^{5.496} = \$191.33$... depending on the occasion, it might just be better to get a hotel. However, there are some ways around this, as we see with our model.
+
+An Airbnb's price is sensitive to customer ratings. If the customer is willing to risk staying at an Airbnb with a worse rating, then the price decreases significantly. With each star the Airbnb is rated less, the price multiplies by, on average, a factor of $e^{-.272} = .762$, holding all else constant. For the average Airbnb, this would result in a price drop to \$145.77/night.
+
+Unsurprisingly, area is also a key factor here. However, customers might not want to stay in lower-income neighborhoods due to a desire for the potentially more upscale experience associated with living in areas with a greater household income, but, if the customer were to diverge from the typical high-income area Airbnbs are associated with, the price drops dramatically. Compared to a high-income area, an Airbnb in an upper-middle income area in Austin, TX, is estimated to be, on average, $e^{-.2501} = .7787$ times the cost, holding all else constant. Interestingly, this factor is nearly the same for lower-middle income areas: $e^{-.2469} = .7812$. For the same average Airbnb, this would translate to \$148.99/night and \$149.47/night, respectively. It is surprising that the price difference between high-income and upper-middle income neighborhoods is drastic while the price difference between upper-middle income and lower-middle income neighborhoods is negligible.
+
+As we expected, a higher number of nights on a minimum night policy generally results in a cheaper Airbnb. However, the model above suggests that it does so by a surprisingly minimal amount---for each extra minimum night, the price of the Airbnb multiplies by, on average, a factor of $e^{-1.306*10^{-3}} = .9987$. This surprisingly minimal (yet statistically significant) effect shows that a customer might want to look for other options to reduce their Airbnb bill.
+
+## Conclusion, Limitations, and Further Discussion
+
+Due to its considerable statistical significance, the log-transformed reduced model including reviews per month, availability out of 365 days (`availability_365`), rating in stars (`stars`), number of listings the host has (`calculated_host_listings`), minimum nights required (`minimum_nights`), rental room type (`room_type`), and median income level of the ZIP code the Airbnb is in (`income_level`) as predictors was selected. Our model has identified several numerical and categorical factors that influence the price of Airbnb in Austin, Texas. One such example is seen with `income_level`---Airbnbs that fall in notably wealthier regions of Austin tended to be more expensive than Airbnbs in less wealthy neighborhoods. In other words, the coefficients for the income level tended to decrease as the median income level for the neighborhood progressively decreased (from the baseline of high-income neighborhoods), leading to a decrease in price for the Airbnb. Another significant categorical variable is `room_type`, as the average price of a shared room tends to be less than a private room which tends to be less than renting an entire proparty. This may indicate that smaller or shared spaces tend to be associated with smaller rental costs in regards to Airbnbs in Austin. 
+
+With these results, though, it is important to keep the limitations of our model in mind. One such limitation was the dataframe having a considerably low number of observations for Airbnbs outside of Austin, as well as for Airbnb that were classified as hotels. Since the data frame only had 205 observations outside Austin, Texas (and 14656 observations inside Austin), we decided to remove these 205 observations and generalize our data to the boundaries of the city. Likewise, there were only 6 observations for a room type of "hotel room", which were removed. This limits our ability to generalize both to all Airbnb destinations and other rental types but prevented potential skew in the data. We were unable to distinguish whether the Airbnbs classified as "Entire home/apt" were an entire house, an apartment, or a condo. Being able to decipher between these relatively different housing arrangements would have added complexity to the model that could have improved its predictive power. Extracting additional identifiers from the Airbnb title, such as number of beds and baths, could have allowed assessment on the how the structure impacts price. Our testing $\text{R}^2$ and Adj. $\text{R}^2$ were consistently about .35, indicating that only 35% of the variability in new data is explained by our model. More variables could be added---such as more detailed structure and property details---that would improve the model's predictive power. 
+
+For the most part, the model could be applied to other Airbnb datasets in different cities. Splitting the ZIP codes into equal, quartile ranges, as defined in the [methodology](#methodology) instead of set boundaries limits this ability but was necessary since more data on other cities' median income levels would have been needed.
+
+Further analysis on amenities and specific room type could be lucrative. Since reviews are relative and variable to the user, exploring the language used in each review using Natural Language Processing techniques could yield insight onto this relativity and its influence on the Airbnb prices as a whole. Furthermore, having information on the size of the Airbnb (square footage) as well as the number of bedrooms and bathrooms could also be key factors in determining the price of Airbnb's.
+
+\pagebreak
+
+## Appendix {#appendix}
+
+### Additional EDA Plots {#additional-eda-plots}
+
+```{r boxplots}
+box1 <- austin_listings |>
+  ggplot(aes(y = price)) +
+  geom_boxplot(outlier.alpha = .05) +
+  ylim(0,750) +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        text = element_text(size = 10)) +
+  geom_hline(yintercept = 500, linetype = "dashed") +
+  labs(title = "Truncated Boxplot")
+  
+
+box2 <- austin_listings |>
+  ggplot(aes(x = "", y = price)) +
+  geom_jitter(alpha = .1, width = .55) +
+  geom_boxplot(outlier.shape = NA, color = "red") +
+  scale_y_continuous(breaks = c(0, 10, 100, 1000, 10000),
+                     minor_breaks = c(50, 500, 5000, 20000)) +
+  coord_trans(y = 'log') +
+  geom_hline(yintercept = 500, linetype = "dashed", color = "red") +
+  theme(
+    axis.title.x = element_blank(), axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    text = element_text(size = 10)
+  ) +
+  labs(title = "Log-scaled Boxplot\nwith All Values")
+
+box1 + box2 + 
+  plot_annotation('Univariate Distribution of Price With Respect to Outliers')
+```
+
+### VIF {#vif}
+
+```{r full-vif}
+full_vif |>
+  kable(col.names = c("Variables", "Full Model"),
+        align = "c", longtable = TRUE, booktabs = TRUE) |>
+  add_header_above(c("Table 2.1: VIF Values for Full Model" = 2), bold = TRUE) |>
+  row_spec(2:12, hline_after = F)
+```
+
+### Residual Plots {#residual-plots}
+
+```{r combine-linearity-normality-red, warning = F, message = F, out.height = 300, out.width = 1200}
+p_linearity_red + p_normality_red
+```
+
+### Spatial Residual Plot {#spatial-residual-plot}
+
+```{r geom-resid-check}
+red_resid_geom <- left_join(
+  left_join(
+    reduced_aug,
+    austin_listings_filtered,
+    by = c(".rownames")
+  ),
+  austin_geom,
+  by = c("neighbourhood" = "Zip.Code")
+)
+
+red_resid_geom <- red_resid_geom |>
+  group_by(neighbourhood) |>
+  count(name = "zip_count") |>
+  right_join(red_resid_geom)
+
+red_resid_geom <- sf::st_as_sf(red_resid_geom) 
+
+red_resid_geom |>
+  ggplot(aes(geometry = the_geom, fill = .resid, color = log(zip_count))) +
+  geom_sf() +
+  scale_color_gradient(low = "magenta", high = "green") +
+  theme(text = element_text(size = 9)) +
+  labs(
+    color = "Log Observations in \n Each Zip Code",
+    fill = "Average Residual",
+    x = "Longitude",
+    y = "Latitude",
+    title = "Spatial Residual Plot With Log Observations"
+  )
+```
+
+### Interaction Model Statistics {#interaction-model-statistics}
+
+```{r interaction-fit}
+interaction_rec <- recipe(
+  logprice ~ neighbourhood + room_type + reviews_per_month + availability_365 + 
+    stars + calculated_host_listings_count + minimum_nights,
+  data = austin_train
+)
+
+interaction_rec <- interaction_rec |>
+  step_mutate(
+    income_level = case_when(
+      neighbourhood == "78738" | neighbourhood == "78738" |
+        neighbourhood == "78737" | neighbourhood == "78732" |
+        neighbourhood == "78733" | neighbourhood == "78739" |
+        neighbourhood == "78746" | neighbourhood == "78730" |
+        neighbourhood == "78701" | neighbourhood == "78734" |
+        neighbourhood == "78717" | neighbourhood == "78703" ~
+        "High Income",
+      neighbourhood == "78749" | neighbourhood == "78750" |
+        neighbourhood == "78735" | neighbourhood == "78731" |
+        neighbourhood == "78736" | neighbourhood == "78759" |
+        neighbourhood == "78747" | neighbourhood == "78756" |
+        neighbourhood == "78727" | neighbourhood == "78729" |
+        neighbourhood == "78704" ~
+        "Upper Mid Income",
+      neighbourhood == "78726" | neighbourhood == "78748" |
+        neighbourhood == "78757" | neighbourhood == "78754" |
+        neighbourhood == "78719" | neighbourhood == "78751" |
+        neighbourhood == "78745" | neighbourhood == "78702" |
+        neighbourhood == "78722" | neighbourhood == "78758" |
+        neighbourhood == "78728" ~
+        "Lower Mid Income",
+      neighbourhood == "78725" | neighbourhood == "78723" |
+        neighbourhood == "78744" | neighbourhood == "78705" |
+        neighbourhood == "78741" | neighbourhood == "78721" |
+        neighbourhood == "78752" | neighbourhood == "78724" |
+        neighbourhood == "78753" | neighbourhood == "78712" |
+        neighbourhood == "78742" ~
+        "Low Income"
+    ), 
+    income_level = factor(income_level, levels = 
+                            c("High Income", "Upper Mid Income", 
+                              "Lower Mid Income", "Low Income"))
+    )|>
+  step_rm(neighbourhood) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_interact(terms = ~ (.-logprice)^2)  |>
+  step_zv(all_predictors()) 
+
+interaction_spec <- linear_reg() |>
+  set_engine("lm")
+
+# Create Workflow
+interaction_wflow <- workflow() |>
+  add_model(interaction_spec) |>
+  add_recipe(interaction_rec)
+
+# Fit Model
+interaction_fit <- interaction_wflow |>
+  fit(data = austin_train) 
+
+interaction_vif <- tidy(vif(interaction_fit$fit$fit$fit))
+interaction_r.squared <- glance(interaction_fit)$r.squared
+```
+
+```{r interaction-fit1}
+
+# Remove minimum_nights, reviews_per_month, and availability_365 from original model
+
+interaction_rec1 <- recipe(
+  logprice ~ neighbourhood + room_type + stars + calculated_host_listings_count,
+  data = austin_train
+)
+
+interaction_rec1 <- interaction_rec1 |>
+  step_mutate(
+    income_level = case_when(
+      neighbourhood == "78738" | neighbourhood == "78738" |
+        neighbourhood == "78737" | neighbourhood == "78732" |
+        neighbourhood == "78733" | neighbourhood == "78739" |
+        neighbourhood == "78746" | neighbourhood == "78730" |
+        neighbourhood == "78701" | neighbourhood == "78734" |
+        neighbourhood == "78717" | neighbourhood == "78703" ~
+        "High Income",
+      neighbourhood == "78749" | neighbourhood == "78750" |
+        neighbourhood == "78735" | neighbourhood == "78731" |
+        neighbourhood == "78736" | neighbourhood == "78759" |
+        neighbourhood == "78747" | neighbourhood == "78756" |
+        neighbourhood == "78727" | neighbourhood == "78729" |
+        neighbourhood == "78704" ~
+        "Upper Mid Income",
+      neighbourhood == "78726" | neighbourhood == "78748" |
+        neighbourhood == "78757" | neighbourhood == "78754" |
+        neighbourhood == "78719" | neighbourhood == "78751" |
+        neighbourhood == "78745" | neighbourhood == "78702" |
+        neighbourhood == "78722" | neighbourhood == "78758" |
+        neighbourhood == "78728" ~
+        "Lower Mid Income",
+      neighbourhood == "78725" | neighbourhood == "78723" |
+        neighbourhood == "78744" | neighbourhood == "78705" |
+        neighbourhood == "78741" | neighbourhood == "78721" |
+        neighbourhood == "78752" | neighbourhood == "78724" |
+        neighbourhood == "78753" | neighbourhood == "78712" |
+        neighbourhood == "78742" ~
+        "Low Income"
+    ), 
+    income_level = factor(income_level, levels = 
+                            c("High Income", "Upper Mid Income", 
+                              "Lower Mid Income", "Low Income"))
+    )|>
+  step_rm(neighbourhood) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_interact(terms = ~ (.-logprice)^2)  |>
+  step_zv(all_predictors()) 
+```
+
+```{r interaction-workflow1}
+# interaction_rec1 |>
+#   prep() |>
+#   bake(austin_listings) |>
+#   glimpse() |>
+#   data.frame()
+
+# Create Workflow
+interaction_wflow1 <- workflow() |>
+  add_model(interaction_spec) |>
+  add_recipe(interaction_rec1)
+
+# Fit Model
+interaction_fit1 <- interaction_wflow1 |>
+  fit(data = austin_train) 
+```
+
+```{r vif1}
+interaction_vif1 <- tidy(vif(interaction_fit1$fit$fit$fit))
+interaction_r.squared1 <- glance(interaction_fit1)$r.squared
+```
+
+```{r interaction-fit2}
+interaction_rec2 <- recipe(
+  logprice ~ room_type + reviews_per_month + availability_365 + stars + calculated_host_listings_count,
+  data = austin_train
+)
+
+interaction_rec2 <- interaction_rec2 |>
+  step_dummy(all_nominal_predictors()) |>
+  step_interact(terms = ~ (.-logprice)^2)  |>
+  step_zv(all_predictors()) 
+```
+
+```{r interaction-workflow2}
+# interaction_rec2 |>
+#   prep() |>
+#   bake(austin_listings) |>
+#   glimpse() |>
+#   data.frame()
+
+# Create Workflow
+interaction_wflow2 <- workflow() |>
+  add_model(interaction_spec) |>
+  add_recipe(interaction_rec2)
+
+# Fit Model
+interaction_fit2 <- interaction_wflow2 |>
+  fit(data = austin_train) 
+```
+
+```{r vif2}
+interaction_vif2 <- tidy(vif(interaction_fit2$fit$fit$fit))
+interaction_r.squared2 <- glance(interaction_fit2)$r.squared
+```
+
+```{r interaction-vif-table}
+interaction_vif_total <- left_join(
+  interaction_vif,
+  left_join(
+    interaction_vif1,
+    interaction_vif2,
+    by = c("names")
+  ),
+  by = c("names")
+)
+
+interaction_vif_total[4,1] <- "host_listings"
+interaction_vif_total[6,1] <- "Private.room"
+interaction_vif_total[7,1] <- "Shared.room"
+interaction_vif_total[8,1] <- "Upper.mid.income"
+interaction_vif_total[9,1] <- "Lower.mid.income"
+interaction_vif_total[10,1] <- "Low.income"
+interaction_vif_total[13,1] <- "reviews_per_month_x_host_listings"
+interaction_vif_total[15,1] <- "reviews_per_month_x_Private.room"
+interaction_vif_total[16,1] <- "reviews_per_month_x_Shared.room"
+interaction_vif_total[17,1] <- "reviews_per_month_x_Upper.mid.income"
+interaction_vif_total[18,1] <- "reviews_per_month_x_Lower.mid.income"
+interaction_vif_total[19,1] <- "reviews_per_month_x_Low.income"
+interaction_vif_total[21,1] <- "availability_365_x_host_listings"
+interaction_vif_total[23,1] <- "availability_365_x_Private.room"
+interaction_vif_total[24,1] <- "availability_365_x_Shared.room"
+interaction_vif_total[25,1] <- "availability_365_x_Upper.mid.income"
+interaction_vif_total[26,1] <- "availability_365_x_Lower.mid.income"
+interaction_vif_total[27,1] <- "availability_365_x_Low.income"
+interaction_vif_total[28,1] <- "stars_x_host_listings"
+interaction_vif_total[30,1] <- "stars_x_Private.room"
+interaction_vif_total[31,1] <- "stars_x_Shared.room"
+interaction_vif_total[32,1] <- "stars_x_Upper.mid.income"
+interaction_vif_total[33,1] <- "stars_x_Lower.mid.income"
+interaction_vif_total[34,1] <- "stars_x_Low.income"
+interaction_vif_total[35,1] <- "host_listings_x_minimum_nights"
+interaction_vif_total[36,1] <- "host_listings_x_Private.room"
+interaction_vif_total[37,1] <- "host_listings_x_Shared.room"
+interaction_vif_total[38,1] <- "host_listings_x_Upper.mid.income"
+interaction_vif_total[39,1] <- "host_listings_x_Lower.mid.income"
+interaction_vif_total[40,1] <- "host_listings_x_Low.income"
+interaction_vif_total[41,1] <- "minimum_nights_x_Private.room"
+interaction_vif_total[42,1] <- "minimum_nights_x_Shared.room"
+interaction_vif_total[43,1] <- "minimum_nights_x_Upper.mid.income"
+interaction_vif_total[44,1] <- "minimum_nights_x_Lower.mid.income"
+interaction_vif_total[45,1] <- "minimum_nights_x_Low.income"
+interaction_vif_total[46,1] <- "Private.room_x_Upper.mid.income"
+interaction_vif_total[47,1] <- "Private.room_x_Lower.mid.income"
+interaction_vif_total[48,1] <- "Private.room_x_Low.income"
+interaction_vif_total[49,1] <- "Shared.room_x_Upper.mid.income"
+interaction_vif_total[50,1] <- "Shared.room_x_Lower.mid.income"
+interaction_vif_total[51,1] <- "Shared.room_x_Low.income"
+
+
+interaction_vif_total |>
+  kable(col.names = c("Terms", "Original VIF", "Iteration 1", "Iteration 2"),
+        longtable = TRUE, align = "c", booktabs = TRUE, digits = 3) |>
+  add_header_above(c("Table 3.1: VIF Scores of Sucsessive Interaction Models" = 4), bold = TRUE) |>
+  row_spec(2:51, hline_after = F) |>
+  pack_rows(index = c("Single Terms" = 10, "Interaction Terms" = 41), hline_after = TRUE)
+```
+
+*Note: Some terms in above table were truncated due to formatting issues.*
+
+```{r interaction-r2-summary}
+tibble("Original" = interaction_r.squared, "Iteration 1" = interaction_r.squared1,
+       "Iteration 2" = interaction_r.squared2, "Reduced Model" = red_r.squared) |>
+  kable(align = "c", longtable = TRUE, booktabs = TRUE) |>
+  add_header_above(c("Table 3.2: Comparative Interaction and Reduced R-squared Values" = 4), bold = TRUE) |>
+  row_spec(1, hline_after = F)
+```
