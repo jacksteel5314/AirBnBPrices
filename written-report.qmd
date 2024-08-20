@@ -1,6 +1,6 @@
 ---
 title: "Predicting the Price of Austin Airbnbs"
-author: "Linearity Legends - Barron Brothers, Jack Steel, Mert Bildirici, Kethan Poduri"
+author: "Linearity Legends - Jack Steel & 3 Others"
 date: "12/01/2023"
 format: pdf
 execute: 
